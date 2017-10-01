@@ -5,12 +5,39 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
+type msgStruct struct {
+	from    string
+	sent_at time.Time
+	msg     string
+}
+
 var state, myPort string
+var CliConn []*net.UDPConn
+var nServers int
+var otherAddr []string
+var msgStack []msgStruct
+var m map[string]*net.UDPConn
+var waiting map[string]bool
+var myTime time.Time
+
+// In order to sort the array by sent_at
+type ByTime []msgStruct
+
+func (s ByTime) Len() int {
+	return len(s)
+}
+func (s ByTime) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+func (s ByTime) Less(i, j int) bool {
+	return s[i].sent_at.Before(s[j].sent_at)
+}
 
 // Verifica se tem erros
 func CheckError(err error) {
@@ -32,13 +59,25 @@ func doServerJob(ServConn *net.UDPConn, buffer []byte, myPort string) {
 	s := strings.Split(string(buffer[0:n]), ",")
 	from, sent_at, message := s[0], s[1], s[2]
 	i, _ := strconv.ParseInt(sent_at, 10, 64)
-	fmt.Println("[", myPort, "]", from, "=>", message, "às", time.Unix(0, i).In(utc), state)
+	if message == "request" {
+		if (state == "held") || (state == "wanted" && myTime.Before(time.Unix(0, i))) {
+			msgStack = append(msgStack, msgStruct{from, time.Unix(0, i).In(utc), message})
+			sort.Sort(ByTime(msgStack))
+		} else {
+			m[from].Write([]byte(makeMsg("reply")))
+		}
+	}
+	if message == "reply" {
+		delete(waiting, from)
+	}
+
+	fmt.Println(msgStack)
 	PrintError(err)
 }
 
-func doClientJob(CliConn *net.UDPConn, msg string) {
+func doClientJob(Conn *net.UDPConn, msg string) {
 	buf := []byte(msg)
-	_, err := CliConn.Write(buf)
+	_, err := Conn.Write(buf)
 	PrintError(err)
 }
 
@@ -70,18 +109,56 @@ func readInput(ch chan string) {
 func makeMsg(x string) string {
 	m := myPort
 	m += ","
-	m += strconv.FormatInt(time.Now().UnixNano(), 10)
+	time_at := time.Now()
+	if x == "request" {
+		myTime = time_at
+	}
+	m += strconv.FormatInt(time_at.UnixNano(), 10)
 	m += ","
 	m += x
 	return m
 }
 
+func enter() {
+	state = "wanted"
+	multicast("request")
+	for len(waiting) > 0 {
+
+	}
+	state = "held"
+
+}
+
+func multicast(x string) {
+	mensagem := makeMsg(x)
+	// So we can try the mutual exclusion
+	time.Sleep(time.Second * 5)
+	for j := 0; j < nServers; j++ {
+		go doClientJob(CliConn[j], mensagem)
+		waiting[otherAddr[j]] = true
+	}
+}
+
+func exit() {
+	state = "released"
+	for len(msgStack) > 0 {
+		// Top (just get next element, don't remove it)
+		msg := msgStack[0]
+		// Discard top element
+		msgStack = msgStack[1:]
+		// Reply msg
+		m[msg.from].Write([]byte(makeMsg("reply")))
+	}
+}
+
 func main() {
+	m = make(map[string]*net.UDPConn)
 	myPort = os.Args[1]
-	nServers := len(os.Args) - 2
-	otherAddr := make([]string, nServers)
+	nServers = len(os.Args) - 2
+	waiting = make(map[string]bool)
+	otherAddr = make([]string, nServers)
 	otherServerAddr := make([]*net.UDPAddr, nServers)
-	CliConn := make([]*net.UDPConn, nServers)
+	CliConn = make([]*net.UDPConn, nServers)
 
 	/// Inicializa servidor
 	// Verifica meu endereço serv
@@ -96,13 +173,14 @@ func main() {
 	myClientAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	CheckError(err)
 	for i := 0; i < nServers; i++ {
-		otherAddr[i] = "127.0.0.1"
-		otherAddr[i] += os.Args[i+2]
+		//otherAddr[i] =
+		otherAddr[i] = os.Args[i+2]
 		// Verifica o endereço serv do outro
-		otherServerAddr[i], err = net.ResolveUDPAddr("udp", otherAddr[i])
+		otherServerAddr[i], err = net.ResolveUDPAddr("udp", "127.0.0.1"+otherAddr[i])
 		CheckError(err)
 		CliConn[i], err = net.DialUDP("udp", myClientAddr, otherServerAddr[i])
 		CheckError(err)
+		m[os.Args[i+2]] = CliConn[i]
 		defer CliConn[i].Close()
 	}
 
@@ -124,13 +202,10 @@ func main() {
 		select {
 		case x, ok := <-ch:
 			if ok {
-
-				//for j := 0; j < nServers; j++ {
-				//	mensagem := makeMsg(x)
-				//	go doClientJob(CliConn[j], mensagem)
-				//}
+				enter()
 				doSharedJob(SharedConn, x)
-				fmt.Printf("[Mensagem] %s | Read and Sent\n", x)
+				fmt.Printf("[Mensagem] %s | Read and Sent - Out of shared \n", x)
+				exit()
 			} else {
 				fmt.Println("Channel closed!")
 			}
