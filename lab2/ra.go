@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
+
+var state, myPort string
 
 // Verifica se tem erros
 func CheckError(err error) {
@@ -23,8 +27,12 @@ func PrintError(err error) {
 }
 
 func doServerJob(ServConn *net.UDPConn, buffer []byte, myPort string) {
-	n, addr, err := ServConn.ReadFromUDP(buffer)
-	fmt.Println("Recebido", myPort, string(buffer[0:n]), " de ", addr)
+	utc, _ := time.LoadLocation("America/Sao_Paulo")
+	n, _, err := ServConn.ReadFromUDP(buffer)
+	s := strings.Split(string(buffer[0:n]), ",")
+	from, sent_at, message := s[0], s[1], s[2]
+	i, _ := strconv.ParseInt(sent_at, 10, 64)
+	fmt.Println("[", myPort, "]", from, "=>", message, "às", time.Unix(0, i).In(utc), state)
 	PrintError(err)
 }
 
@@ -34,16 +42,42 @@ func doClientJob(CliConn *net.UDPConn, msg string) {
 	PrintError(err)
 }
 
+func doSharedJob(SharedConn *net.UDPConn, msg string) {
+	// Msg inicio
+	msg_i := makeMsg("[Iniciando acesso ao recurso]")
+	buf := []byte(msg_i)
+	_, err := SharedConn.Write(buf)
+	PrintError(err)
+	// Msg a enviar
+	buf = []byte(msg)
+	_, err = SharedConn.Write(buf)
+	PrintError(err)
+	// Msg encerrando
+	msg_f := makeMsg("[Finalizando acesso ao recurso]")
+	buf = []byte(msg_f)
+	_, err = SharedConn.Write(buf)
+	PrintError(err)
+}
+
 func readInput(ch chan string) {
 	reader := bufio.NewReader(os.Stdin)
 	for {
-		text, _ := reader.ReadString('\n')
-		ch <- text
+		text, _, _ := reader.ReadLine()
+		ch <- string(text)
 	}
 }
 
+func makeMsg(x string) string {
+	m := myPort
+	m += ","
+	m += strconv.FormatInt(time.Now().UnixNano(), 10)
+	m += ","
+	m += x
+	return m
+}
+
 func main() {
-	myPort := os.Args[1]
+	myPort = os.Args[1]
 	nServers := len(os.Args) - 2
 	otherAddr := make([]string, nServers)
 	otherServerAddr := make([]*net.UDPAddr, nServers)
@@ -67,16 +101,22 @@ func main() {
 		// Verifica o endereço serv do outro
 		otherServerAddr[i], err = net.ResolveUDPAddr("udp", otherAddr[i])
 		CheckError(err)
-
 		CliConn[i], err = net.DialUDP("udp", myClientAddr, otherServerAddr[i])
 		CheckError(err)
 		defer CliConn[i].Close()
 	}
+
+	/// Inicializa o acesso de escrita ao recurso compartilhado
+	sharedAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:10001")
+	CheckError(err)
+	SharedConn, err := net.DialUDP("udp", myClientAddr, sharedAddr)
+	CheckError(err)
+	defer SharedConn.Close()
+
 	ch := make(chan string)
 	go readInput(ch)
 	buffer := make([]byte, 1024)
-	i := 0
-	state := "released"
+	state = "released"
 	for {
 		//Server
 		go doServerJob(ServConn, buffer, myPort)
@@ -84,10 +124,13 @@ func main() {
 		select {
 		case x, ok := <-ch:
 			if ok {
-				for j := 0; j < nServers; j++ {
-					go doClientJob(CliConn[j], x)
-				}
-				fmt.Printf("Value %s was read and sent\n", x)
+
+				//for j := 0; j < nServers; j++ {
+				//	mensagem := makeMsg(x)
+				//	go doClientJob(CliConn[j], mensagem)
+				//}
+				doSharedJob(SharedConn, x)
+				fmt.Printf("[Mensagem] %s | Read and Sent\n", x)
 			} else {
 				fmt.Println("Channel closed!")
 			}
@@ -99,7 +142,6 @@ func main() {
 
 		// Wait a while
 		time.Sleep(time.Second * 1)
-		i++
 	}
 
 }
