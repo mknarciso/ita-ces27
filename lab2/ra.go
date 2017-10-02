@@ -56,23 +56,28 @@ func PrintError(err error) {
 func doServerJob(ServConn *net.UDPConn, buffer []byte, myPort string) {
 	utc, _ := time.LoadLocation("America/Sao_Paulo")
 	n, _, err := ServConn.ReadFromUDP(buffer)
+	PrintError(err)
 	s := strings.Split(string(buffer[0:n]), ",")
 	from, sent_at, message := s[0], s[1], s[2]
 	i, _ := strconv.ParseInt(sent_at, 10, 64)
+	// So we can try the mutual exclusion
+	time.Sleep(time.Second * 5)
 	if message == "request" {
+		fmt.Println("Received request from", from)
 		if (state == "held") || (state == "wanted" && myTime.Before(time.Unix(0, i))) {
 			msgStack = append(msgStack, msgStruct{from, time.Unix(0, i).In(utc), message})
 			sort.Sort(ByTime(msgStack))
+			fmt.Println("Put", from, "in stack")
 		} else {
 			m[from].Write([]byte(makeMsg("reply")))
+			fmt.Println("Sent reply to", from)
+
 		}
 	}
 	if message == "reply" {
+		fmt.Println("Received reply from ", from)
 		delete(waiting, from)
 	}
-
-	fmt.Println(msgStack)
-	PrintError(err)
 }
 
 func doClientJob(Conn *net.UDPConn, msg string) {
@@ -82,19 +87,8 @@ func doClientJob(Conn *net.UDPConn, msg string) {
 }
 
 func doSharedJob(SharedConn *net.UDPConn, msg string) {
-	// Msg inicio
-	msg_i := makeMsg("[Iniciando acesso ao recurso]")
-	buf := []byte(msg_i)
-	_, err := SharedConn.Write(buf)
-	PrintError(err)
-	// Msg a enviar
-	buf = []byte(msg)
-	_, err = SharedConn.Write(buf)
-	PrintError(err)
-	// Msg encerrando
-	msg_f := makeMsg("[Finalizando acesso ao recurso]")
-	buf = []byte(msg_f)
-	_, err = SharedConn.Write(buf)
+	// Do whatever you have to do inside the shared zone
+	_, err := SharedConn.Write([]byte(makeMsg(msg)))
 	PrintError(err)
 }
 
@@ -107,32 +101,28 @@ func readInput(ch chan string) {
 }
 
 func makeMsg(x string) string {
-	m := myPort
-	m += ","
 	time_at := time.Now()
 	if x == "request" {
 		myTime = time_at
 	}
-	m += strconv.FormatInt(time_at.UnixNano(), 10)
-	m += ","
-	m += x
-	return m
+	return myPort + "," + strconv.FormatInt(time_at.UnixNano(), 10) + "," + x
 }
 
 func enter() {
 	state = "wanted"
+	fmt.Println("State is wanted")
 	multicast("request")
+	if len(waiting) > 0 {
+		fmt.Println("Waiting all replies")
+	}
 	for len(waiting) > 0 {
-
 	}
 	state = "held"
-
+	fmt.Println("State is held")
 }
 
 func multicast(x string) {
 	mensagem := makeMsg(x)
-	// So we can try the mutual exclusion
-	time.Sleep(time.Second * 5)
 	for j := 0; j < nServers; j++ {
 		go doClientJob(CliConn[j], mensagem)
 		waiting[otherAddr[j]] = true
@@ -141,6 +131,7 @@ func multicast(x string) {
 
 func exit() {
 	state = "released"
+	fmt.Println("State is released")
 	for len(msgStack) > 0 {
 		// Top (just get next element, don't remove it)
 		msg := msgStack[0]
@@ -148,6 +139,7 @@ func exit() {
 		msgStack = msgStack[1:]
 		// Reply msg
 		m[msg.from].Write([]byte(makeMsg("reply")))
+		fmt.Println("Sent reply to", msg.from)
 	}
 }
 
@@ -203,8 +195,9 @@ func main() {
 		case x, ok := <-ch:
 			if ok {
 				enter()
+				fmt.Printf("[SharedZone] Write on server: %s \n", x)
 				doSharedJob(SharedConn, x)
-				fmt.Printf("[Mensagem] %s | Read and Sent - Out of shared \n", x)
+				fmt.Println("[SharedZone] Leaving...")
 				exit()
 			} else {
 				fmt.Println("Channel closed!")
