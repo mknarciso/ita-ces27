@@ -26,7 +26,7 @@ var m map[string]*net.UDPConn
 var waiting map[string]bool
 var myTime time.Time
 
-// In order to sort the array by sent_at
+/// In order to sort the array by sent_at
 type ByTime []msgStruct
 
 func (s ByTime) Len() int {
@@ -39,7 +39,7 @@ func (s ByTime) Less(i, j int) bool {
 	return s[i].sent_at.Before(s[j].sent_at)
 }
 
-// Verifica se tem erros
+// Check and break if has errors
 func CheckError(err error) {
 	if err != nil {
 		fmt.Println("Erro: ", err)
@@ -47,12 +47,15 @@ func CheckError(err error) {
 	}
 }
 
+// Check and print errors
 func PrintError(err error) {
 	if err != nil {
 		fmt.Println("Erro: ", err)
 	}
 }
 
+// Routine that handles the listening port, receiving other RA messages
+// and processing them
 func doServerJob(ServConn *net.UDPConn, buffer []byte, myPort string) {
 	utc, _ := time.LoadLocation("America/Sao_Paulo")
 	n, _, err := ServConn.ReadFromUDP(buffer)
@@ -60,8 +63,10 @@ func doServerJob(ServConn *net.UDPConn, buffer []byte, myPort string) {
 	s := strings.Split(string(buffer[0:n]), ",")
 	from, sent_at, message := s[0], s[1], s[2]
 	i, _ := strconv.ParseInt(sent_at, 10, 64)
-	// So we can try the mutual exclusion
+	// Add 5 seconds delay so we can try the mutual exclusion
 	time.Sleep(time.Second * 5)
+
+	// Process the Mutual exclusion as the RA algorithm
 	if message == "request" {
 		fmt.Println("Received request from", from)
 		if (state == "held") || (state == "wanted" && myTime.Before(time.Unix(0, i))) {
@@ -93,6 +98,8 @@ func doSharedJob(SharedConn *net.UDPConn, msg string) {
 }
 
 func readInput(ch chan string) {
+	// Non-blocking async routine to listen for terminal
+	// input as a request for shared resource
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		text, _, _ := reader.ReadLine()
@@ -101,6 +108,8 @@ func readInput(ch chan string) {
 }
 
 func makeMsg(x string) string {
+	// Put a message and important info in a single string
+	// comma separeted
 	time_at := time.Now()
 	if x == "request" {
 		myTime = time_at
@@ -109,19 +118,23 @@ func makeMsg(x string) string {
 }
 
 func enter() {
+	// Request to enter the shared zone
 	state = "wanted"
 	fmt.Println("State is wanted")
 	multicast("request")
+	// wait for all other processes to reply
 	if len(waiting) > 0 {
 		fmt.Println("Waiting all replies")
 	}
 	for len(waiting) > 0 {
 	}
+	// Gained access to the shared zone
 	state = "held"
 	fmt.Println("State is held")
 }
 
 func multicast(x string) {
+	// Send RA message to all other Processes
 	mensagem := makeMsg(x)
 	for j := 0; j < nServers; j++ {
 		go doClientJob(CliConn[j], mensagem)
@@ -130,6 +143,7 @@ func multicast(x string) {
 }
 
 func exit() {
+	// Exit the shared zone
 	state = "released"
 	fmt.Println("State is released")
 	for len(msgStack) > 0 {
@@ -144,30 +158,29 @@ func exit() {
 }
 
 func main() {
+	// Initialize variables and get terminal inputs
 	m = make(map[string]*net.UDPConn)
 	myPort = os.Args[1]
 	nServers = len(os.Args) - 2
 	waiting = make(map[string]bool)
+	// Other processes server ports
 	otherAddr = make([]string, nServers)
 	otherServerAddr := make([]*net.UDPAddr, nServers)
 	CliConn = make([]*net.UDPConn, nServers)
 
-	/// Inicializa servidor
-	// Verifica meu endereço serv
+	/// Start server services
 	myServerAddr, err := net.ResolveUDPAddr("udp", myPort)
 	CheckError(err)
-	// Escuta conexões na porta encontrada
 	ServConn, err := net.ListenUDP("udp", myServerAddr)
 	CheckError(err)
 	defer ServConn.Close()
 
-	/// Inicializa conexões como cliente
+	/// Start client service connection with each of the
+	/// processes
 	myClientAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	CheckError(err)
 	for i := 0; i < nServers; i++ {
-		//otherAddr[i] =
 		otherAddr[i] = os.Args[i+2]
-		// Verifica o endereço serv do outro
 		otherServerAddr[i], err = net.ResolveUDPAddr("udp", "127.0.0.1"+otherAddr[i])
 		CheckError(err)
 		CliConn[i], err = net.DialUDP("udp", myClientAddr, otherServerAddr[i])
@@ -176,21 +189,23 @@ func main() {
 		defer CliConn[i].Close()
 	}
 
-	/// Inicializa o acesso de escrita ao recurso compartilhado
+	/// Starts the connection to the shared resource
 	sharedAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:10001")
 	CheckError(err)
 	SharedConn, err := net.DialUDP("udp", myClientAddr, sharedAddr)
 	CheckError(err)
 	defer SharedConn.Close()
 
+	// Starts listening to inputs (requests for shared resource)
 	ch := make(chan string)
 	go readInput(ch)
 	buffer := make([]byte, 1024)
 	state = "released"
 	for {
-		//Server
+		// Async listen to my server port
 		go doServerJob(ServConn, buffer, myPort)
-		//Client
+		// When there is a request (from stdin) ask for the
+		// shared resource, to send it
 		select {
 		case x, ok := <-ch:
 			if ok {
@@ -205,7 +220,6 @@ func main() {
 		default:
 			// Do nothing
 			time.Sleep(time.Second * 1)
-			//fmt.Println("No value ready, moving on.")
 		}
 
 		// Wait a while
